@@ -1,7 +1,7 @@
-
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import javax.crypto.SecretKey;
 import java.io.*;
 import java.nio.file.*;
 import java.security.MessageDigest;
@@ -12,7 +12,7 @@ import java.util.zip.*;
 public class SecurePack {
 
     private static final String RECORD_FILE = "records.txt";
-    private static final int AES_KEY_SIZE = 16; // 128 bits = 16 bytes
+    private static final int AES_KEY_SIZE = 128; // 128 bits
     private static final int GCM_IV_LENGTH = 12; // 12 bytes
     private static final int GCM_TAG_LENGTH = 16; // 16 bytes
 
@@ -33,18 +33,19 @@ public class SecurePack {
 
     // ================= CREAR EMPAQUETADO =================
     private static void createPackage() throws Exception {
-        File folder = new File("data/comprimir");
+        String folderPath = "data/comprimir";
+        File folder = new File(folderPath);
         if(!folder.exists() || !folder.isDirectory()) {
-            System.out.println("Carpeta data/comprimir no encontrada.");
+            System.out.println("La carpeta data/comprimir no existe.");
             return;
         }
 
         Scanner sc = new Scanner(System.in);
         System.out.println("Ingresa una clave AES:");
         String password = sc.nextLine();
-        SecretKeySpec key = getAESKeyFromPassword(password);
+        SecretKey key = getAESKeyFromPassword(password);
 
-        // Crear ZIP en memoria
+        // Crear archivo temporal comprimido
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ZipOutputStream zos = new ZipOutputStream(baos);
 
@@ -78,37 +79,41 @@ public class SecurePack {
         cipher.init(Cipher.ENCRYPT_MODE, key, spec);
         byte[] encrypted = cipher.doFinal(compressedData);
 
-        // Crear nombre de paquete único con UUID
-        String packageName = "package_" + UUID.randomUUID() + ".secure";
+        // Crear ID único
+        String packageId = UUID.randomUUID().toString();
+        String packageFileName = "package_" + packageId + ".secure";
 
-        // Guardar empaquetado en raíz del proyecto
-        FileOutputStream fos = new FileOutputStream(packageName);
-        fos.write(iv);          // primero IV
-        fos.write(encrypted);   // luego datos cifrados
-        fos.close();
+        // Guardar empaquetado final en raíz del proyecto
+        try (FileOutputStream fos = new FileOutputStream(packageFileName)) {
+            fos.write(iv);          // primero IV
+            fos.write(encrypted);   // luego datos cifrados
+        }
 
         // Guardar registros en archivo local
         try(PrintWriter pw = new PrintWriter(new FileWriter(RECORD_FILE, true))) {
             for(Map.Entry<String, String> e : fileChecksums.entrySet()) {
-                pw.println(packageName + "," + e.getKey() + "," + e.getValue() + "," + sha256(password.getBytes()));
+                pw.println(packageId + "," + e.getKey() + "," + e.getValue() + "," + sha256(password.getBytes()));
             }
         }
 
-        System.out.println("Empaquetado creado: " + packageName);
+        System.out.println("Empaquetado creado: " + packageFileName);
     }
 
     // ================= DESENCRIPTAR EMPAQUETADO =================
     private static void decryptPackage() throws Exception {
         Scanner sc = new Scanner(System.in);
-        System.out.println("Ingresa el nombre del paquete (ej: package_xxx.secure):");
-        String packageName = sc.nextLine();
+        System.out.println("Ingresa el nombre del archivo empaquetado (ej: package_xxx.secure):");
+        String packageFileName = sc.nextLine();
 
         System.out.println("Ingresa la clave AES:");
         String password = sc.nextLine();
-        SecretKeySpec key = getAESKeyFromPassword(password);
+        SecretKey key = getAESKeyFromPassword(password);
+
+        // Extraer el ID desde el nombre del archivo
+        String packageId = packageFileName.replace("package_", "").replace(".secure", "");
 
         // Leer archivo empaquetado
-        byte[] fileBytes = Files.readAllBytes(Paths.get(packageName));
+        byte[] fileBytes = Files.readAllBytes(Paths.get(packageFileName));
         byte[] iv = Arrays.copyOfRange(fileBytes, 0, GCM_IV_LENGTH);
         byte[] encrypted = Arrays.copyOfRange(fileBytes, GCM_IV_LENGTH, fileBytes.length);
 
@@ -124,10 +129,9 @@ public class SecurePack {
             return;
         }
 
-        // Carpeta destino = data/descomprimido/(nombre del paquete sin .secure)/
-        String baseName = packageName.replace(".secure", "");
-        Path outputDir = Paths.get("data/descomprimido/" + baseName);
-        Files.createDirectories(outputDir);
+        // Crear carpeta de salida: data/descomprimido/(packageId)/
+        File outDir = new File("data/descomprimido/" + packageId);
+        outDir.mkdirs();
 
         // Extraer archivos de ZIP
         ByteArrayInputStream bais = new ByteArrayInputStream(decompressedBytes);
@@ -144,7 +148,7 @@ public class SecurePack {
             zis.closeEntry();
 
             // Verificar checksum contra archivo local
-            String storedHash = findRecord(packageName, entry.getName(), sha256(password.getBytes()));
+            String storedHash = findRecord(packageId, entry.getName(), sha256(password.getBytes()));
             if(storedHash == null) {
                 System.out.println("Archivo " + entry.getName() + " no registrado o clave incorrecta.");
                 continue;
@@ -155,17 +159,16 @@ public class SecurePack {
                 continue;
             }
 
-            // Guardar archivo restaurado en carpeta correspondiente
-            Path fileOut = outputDir.resolve(entry.getName());
-            Files.write(fileOut, content);
-            System.out.println("Archivo restaurado: " + fileOut);
+            // Guardar archivo restaurado
+            Files.write(Paths.get(outDir.getPath(), entry.getName()), content);
+            System.out.println("Archivo restaurado: " + outDir.getPath() + "/" + entry.getName());
         }
         zis.close();
     }
 
     // ================= FUNCIONES AUXILIARES =================
-    private static SecretKeySpec getAESKeyFromPassword(String password) throws Exception {
-        byte[] keyBytes = Arrays.copyOf(password.getBytes("UTF-8"), AES_KEY_SIZE);
+    private static SecretKey getAESKeyFromPassword(String password) throws Exception {
+        byte[] keyBytes = Arrays.copyOf(password.getBytes("UTF-8"), AES_KEY_SIZE/8);
         return new SecretKeySpec(keyBytes, "AES");
     }
 
@@ -177,14 +180,14 @@ public class SecurePack {
         return sb.toString();
     }
 
-    private static String findRecord(String packageName, String fileName, String passwordHash) throws Exception {
+    private static String findRecord(String packageId, String fileName, String passwordHash) throws Exception {
         File f = new File(RECORD_FILE);
         if(!f.exists()) return null;
         try(BufferedReader br = new BufferedReader(new FileReader(f))) {
             String line;
             while((line = br.readLine()) != null) {
                 String[] parts = line.split(",");
-                if(parts.length == 4 && parts[0].equals(packageName) && parts[1].equals(fileName) && parts[3].equals(passwordHash)) {
+                if(parts.length == 4 && parts[0].equals(packageId) && parts[1].equals(fileName) && parts[3].equals(passwordHash)) {
                     return parts[2]; // devuelve checksum
                 }
             }
